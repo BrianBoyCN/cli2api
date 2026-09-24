@@ -89,6 +89,31 @@ func (c *Catalog) CachedCount(accountID string, mode CatalogMode) int {
 	return len(entry.Models)
 }
 
+// ModelContextLength resolves a model's default context window from the cached
+// (or freshly fetched) merged catalog. It returns ok=false when the model or its
+// window is unknown, so callers fall back to the static default.
+func (c *Catalog) ModelContextLength(modelID string) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	models, err := c.Get(false, "", CatalogModeMerge)
+	if err != nil {
+		return 0, false
+	}
+	key := ModelContextKey(modelID)
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		if ModelContextKey(id) != key {
+			continue
+		}
+		if window, ok := catalogInt(model["catalog_context_length"]); ok && window > 0 {
+			return window, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
 func (c *Catalog) snapshot(accountID string, mode CatalogMode) []map[string]any {
 	if c == nil {
 		return nil

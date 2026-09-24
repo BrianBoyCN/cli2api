@@ -9,6 +9,9 @@ import (
 
 type Settings struct {
 	store accounts.AccountStore
+	// catalog is optional. When bound, per-model context defaults come from the
+	// upstream catalog instead of the hardcoded fallback.
+	catalog *Catalog
 }
 
 func NewSettings(store accounts.AccountStore) *Settings {
@@ -16,6 +19,26 @@ func NewSettings(store accounts.AccountStore) *Settings {
 		return nil
 	}
 	return &Settings{store: store}
+}
+
+// BindCatalog lets settings resolve per-model context defaults from the display
+// catalog. It is called during process assembly, before the server serves.
+func (s *Settings) BindCatalog(catalog *Catalog) {
+	if s == nil {
+		return
+	}
+	s.catalog = catalog
+}
+
+// DefaultContextLength is the model's default context window: the upstream
+// value the catalog reported when available, otherwise the static fallback.
+func (s *Settings) DefaultContextLength(modelID string) int {
+	if s != nil && s.catalog != nil {
+		if window, ok := s.catalog.ModelContextLength(modelID); ok {
+			return window
+		}
+	}
+	return DefaultContextForModel(modelID)
 }
 
 func (s *Settings) GetSecret(ctx context.Context, name string) (string, bool, error) {
@@ -94,7 +117,7 @@ func (s *Settings) ReadModelSetting(ctx context.Context, provider, modelID strin
 		if err != nil {
 			return ModelSetting{}, operationError("model_setting_failed", err.Error())
 		}
-		defaultValue := DefaultContextForModel(modelID)
+		defaultValue := s.DefaultContextLength(modelID)
 		if !custom {
 			value = defaultValue
 		}

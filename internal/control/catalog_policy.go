@@ -316,7 +316,15 @@ func DecorateModelsWithContext(ctx context.Context, settings *Settings, models [
 		case "trae", "workbuddy":
 			decorateProviderSettings(ctx, settings, item, provider, settingsKey)
 		default:
+			// Prefer the window Qoder actually reports for this model over the
+			// hardcoded fallback, so the console never mis-sizes a model (for
+			// example glm-5.3-flash at 1M or deepseek-v4-pro at 96K).
 			defaultValue := DefaultContextForModel(settingsKey)
+			if catalogWindow, ok := catalogInt(item["catalog_context_length"]); ok && catalogWindow > 0 {
+				defaultValue = catalogWindow
+			} else if settings != nil {
+				defaultValue = settings.DefaultContextLength(settingsKey)
+			}
 			value, custom := configured[settingsKey]
 			if !custom {
 				value = defaultValue
