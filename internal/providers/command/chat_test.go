@@ -329,3 +329,71 @@ func TestPlanTotalCredits(t *testing.T) {
 		t.Error("unknown plan must not resolve")
 	}
 }
+
+// TestUsagePrefersFinishStepAndFallsBackToFinish mirrors the real upstream
+// stream, which sends both finish-step (usage) and finish (totalUsage).
+func TestUsagePrefersFinishStepAndFallsBackToFinish(t *testing.T) {
+	body := ndjson(
+		`{"type":"text-delta","id":"t0","text":"OK"}`,
+		`{"type":"finish-step","finishReason":"stop","usage":{"inputTokens":7586,"outputTokens":2,"cachedInputTokens":7424}}`,
+		`{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":7586,"outputTokens":2,"cachedInputTokens":7424}}`,
+	)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	outcome, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatNonStream: %v", err)
+	}
+	if outcome.PromptTokens != 7586 || outcome.CompletionTokens != 2 {
+		t.Errorf("tokens = %d/%d, want 7586/2 (finish-step usage must survive the finish event)",
+			outcome.PromptTokens, outcome.CompletionTokens)
+	}
+	if outcome.CacheReadTokens == nil || *outcome.CacheReadTokens != 7424 {
+		t.Errorf("cacheRead = %v, want 7424", outcome.CacheReadTokens)
+	}
+}
+
+// TestUsageFromFinishOnly covers a stream that only sends the terminal `finish`
+// with `totalUsage`.
+func TestUsageFromFinishOnly(t *testing.T) {
+	body := ndjson(
+		`{"type":"text-delta","id":"t0","text":"OK"}`,
+		`{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":100,"outputTokens":7,"inputTokenDetails":{"cacheReadTokens":40}}}`,
+	)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	outcome, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatNonStream: %v", err)
+	}
+	if outcome.PromptTokens != 100 || outcome.CompletionTokens != 7 {
+		t.Errorf("tokens = %d/%d, want 100/7", outcome.PromptTokens, outcome.CompletionTokens)
+	}
+	if outcome.CacheReadTokens == nil || *outcome.CacheReadTokens != 40 {
+		t.Errorf("cacheRead = %v, want 40 (from inputTokenDetails)", outcome.CacheReadTokens)
+	}
+}
+
+// TestStreamUsageUnderFinishStep ensures the SSE usage chunk carries numbers
+// even though a later finish/totalUsage event arrives.
+func TestStreamUsageUnderFinishStep(t *testing.T) {
+	body := ndjson(
+		`{"type":"text-delta","id":"t0","text":"OK"}`,
+		`{"type":"finish-step","finishReason":"stop","usage":{"inputTokens":7586,"outputTokens":2,"cachedInputTokens":7424}}`,
+		`{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":7586,"outputTokens":2,"cachedInputTokens":7424}}`,
+	)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	resp, _, err := client.ChatStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	text := string(raw)
+	for _, want := range []string{`"prompt_tokens":7586`, `"completion_tokens":2`, `"cache_read_tokens":7424`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("SSE usage missing %s\n%s", want, text)
+		}
+	}
+}

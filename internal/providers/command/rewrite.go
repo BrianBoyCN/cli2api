@@ -82,7 +82,12 @@ func (w *sseWriter) handle(event generateEvent) error {
 		if event.FinishReason != "" {
 			w.finishReason = event.FinishReason
 		}
-		w.usage = usagePayload(event.Usage)
+		// finish-step carries `usage`; finish carries `totalUsage`. They are
+		// two terminal events in the same stream, so a nil from the second must
+		// not clobber the first's numbers.
+		if payload := usagePayload(event.usage()); payload != nil {
+			w.usage = payload
+		}
 		return nil
 	case "error":
 		return errorFromEvent(event)

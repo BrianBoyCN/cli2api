@@ -179,7 +179,7 @@ func (a *aggregate) toolEvent(event generateEvent) {
 
 func (a *aggregate) terminal(event generateEvent) {
 	a.sawTerminalEvent = true
-	if usage := event.Usage; usage != nil {
+	if usage := event.usage(); usage != nil {
 		a.inputTokens = usage.InputTokens
 		a.outputTokens = usage.OutputTokens
 		a.cacheReadTokens = usage.cacheReadTokens()

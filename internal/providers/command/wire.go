@@ -76,6 +76,16 @@ func (e generateEvent) toolEventName() string {
 	return firstNonEmpty(e.ToolName, e.Name)
 }
 
+// usage prefers `usage` (finish-step) and falls back to `totalUsage` (finish).
+// The gateway emits both terminal events in one stream; only one carries the
+// numbers, so callers must not assume `usage` is always present.
+func (e generateEvent) usage() *eventUsage {
+	if e.Usage != nil {
+		return e.Usage
+	}
+	return e.TotalUsage
+}
+
 // streamEvents parses the NDJSON body line by line. Blank lines are skipped;
 // malformed lines are tolerated (a stray keep-alive must not kill the stream).
 func streamEvents(r io.Reader, onEvent func(generateEvent) error) error {
