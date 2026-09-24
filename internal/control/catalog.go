@@ -93,12 +93,21 @@ func (c *Catalog) CachedCount(accountID string, mode CatalogMode) int {
 // (or freshly fetched) merged catalog. It returns ok=false when the model or its
 // window is unknown, so callers fall back to the static default.
 func (c *Catalog) ModelContextLength(modelID string) (int, bool) {
+	dev, _, ok := c.ModelContextWindows(modelID)
+	return dev, ok
+}
+
+// ModelContextWindows returns a model's default window and its largest
+// selectable window. max is 0 when the model has no larger tier. ok=false when
+// the model or its window is unknown, so callers fall back to the static
+// default.
+func (c *Catalog) ModelContextWindows(modelID string) (dev, max int, ok bool) {
 	if c == nil {
-		return 0, false
+		return 0, 0, false
 	}
 	models, err := c.Get(false, "", CatalogModeMerge)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	key := ModelContextKey(modelID)
 	for _, model := range models {
@@ -107,11 +116,14 @@ func (c *Catalog) ModelContextLength(modelID string) (int, bool) {
 			continue
 		}
 		if window, ok := catalogInt(model["catalog_context_length"]); ok && window > 0 {
-			return window, true
+			dev = window
 		}
-		return 0, false
+		if windowMax, ok := catalogInt(model["catalog_context_length_max"]); ok && windowMax > dev {
+			max = windowMax
+		}
+		return dev, max, dev > 0
 	}
-	return 0, false
+	return 0, 0, false
 }
 
 func (c *Catalog) snapshot(accountID string, mode CatalogMode) []map[string]any {

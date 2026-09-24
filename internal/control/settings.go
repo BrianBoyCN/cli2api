@@ -41,6 +41,19 @@ func (s *Settings) DefaultContextLength(modelID string) int {
 	return DefaultContextForModel(modelID)
 }
 
+// MaxContextLength is the model's larger selectable window, or 0 when the
+// catalog advertises no larger tier.
+func (s *Settings) MaxContextLength(modelID string) int {
+	if s == nil || s.catalog == nil {
+		return 0
+	}
+	_, maxWindow, ok := s.catalog.ModelContextWindows(modelID)
+	if !ok {
+		return 0
+	}
+	return maxWindow
+}
+
 func (s *Settings) GetSecret(ctx context.Context, name string) (string, bool, error) {
 	return s.store.GetSecret(ctx, name)
 }
@@ -112,6 +125,25 @@ func (s *Settings) ReadModelSetting(ctx context.Context, provider, modelID strin
 		out.ReasoningEffort = setting.ReasoningEffort
 		out.ContextCustom = setting.MaxMode || setting.ReasoningEffort != ""
 		return out, nil
+	case "qoder":
+		// Qoder exposes the same default/max-context toggle as Trae. The stored
+		// value is the numeric window, so map it back onto the switch: the max
+		// window means "on", anything else (or nothing stored) means "off". The
+		// effective ContextLength defaults to the model's default window.
+		value, custom, err := s.GetModelContext(ctx, modelID)
+		if err != nil {
+			return ModelSetting{}, operationError("model_setting_failed", err.Error())
+		}
+		dev := s.DefaultContextLength(modelID)
+		maxWindow := s.MaxContextLength(modelID)
+		if !custom {
+			value = dev
+		}
+		out.ContextLength = value
+		out.DefaultContextLength = dev
+		out.MaxMode = custom && maxWindow > dev && value >= maxWindow
+		out.ContextCustom = custom
+		return out, nil
 	default:
 		value, custom, err := s.GetModelContext(ctx, modelID)
 		if err != nil {
@@ -144,6 +176,21 @@ func (s *Settings) UpdateModelSetting(ctx context.Context, provider, modelID str
 			ReasoningEffort: setting.ReasoningEffort,
 			ContextCustom:   setting.MaxMode || setting.ReasoningEffort != "",
 		}, nil
+	case "qoder":
+		// The Qoder toggle writes the numeric window the adapter forwards: on
+		// stores the larger window, off clears any stored override so the request
+		// falls back to the model's default. A direct context_length still wins.
+		length := 0
+		switch {
+		case contextLength != nil:
+			length = *contextLength
+		case patch.MaxMode != nil && *patch.MaxMode:
+			length = s.MaxContextLength(modelID)
+		}
+		if err := s.SetModelContext(ctx, modelID, length); err != nil {
+			return ModelSetting{}, operationError("model_setting_failed", err.Error())
+		}
+		return s.ReadModelSetting(ctx, provider, modelID)
 	default:
 		length := 0
 		if contextLength != nil {
