@@ -249,19 +249,83 @@ func TestProbeBadKey(t *testing.T) {
 }
 
 func TestQuotaCredits(t *testing.T) {
-	srv := newCreditsServer(t, http.StatusOK, `{"credits":{"monthlyCredits":9.5,"purchasedCredits":1,"freeCredits":0.5}}`)
+	body := `{"credits":{"monthlyCredits":9.5,"purchasedCredits":1,"freeCredits":0.5,"planId":"individual-go"},` +
+		`"windowLimits":{"fiveHour":{"used":3,"cap":10,"resetAt":1893456000000},"weekly":{"used":20,"cap":70,"resetAt":1893456000000}}}`
+	srv := newCreditsServer(t, http.StatusOK, body)
 	client, _ := newTestClient(t, srv)
 	info, err := client.Quota(t.Context(), "acc-1")
 	if err != nil {
 		t.Fatalf("Quota: %v", err)
 	}
-	if info == nil || info.Remaining != 11 {
-		t.Fatalf("quota = %+v", info)
+	if info == nil {
+		t.Fatal("quota must not be nil")
 	}
 	if info.ProviderID != "command" || info.Unit != QuotaUnit {
 		t.Errorf("quota metadata = %+v", info)
 	}
-	if info.Exceeded {
-		t.Errorf("exceeded should be false when credits remain: %+v", info)
+
+	byID := map[string]providers.QuotaWindow{}
+	for _, w := range info.Windows {
+		byID[w.ID] = w
+	}
+	if len(info.Windows) != 3 {
+		t.Fatalf("want 5h + weekly + monthly windows, got %+v", info.Windows)
+	}
+
+	five := byID["fiveHour"]
+	if five.Total != 10 || five.Used != 3 || five.Percentage != 30 {
+		t.Errorf("five-hour window = %+v", five)
+	}
+	if five.ResetAt == "" {
+		t.Error("five-hour resetAt must be formatted")
+	}
+	weekly := byID["weeklyLimit"]
+	if weekly.Total != 70 || weekly.Used != 20 {
+		t.Errorf("weekly window = %+v", weekly)
+	}
+
+	// monthly: plan individual-go = 10 total, 9.5 remaining -> 0.5 used (5%).
+	monthly := byID["monthlyLimit"]
+	if monthly.Total != 10 || monthly.Remaining != 9.5 || monthly.Used != 0.5 {
+		t.Errorf("monthly window = %+v", monthly)
+	}
+	if info.Total != 10 || info.Percentage != 5 {
+		t.Errorf("headline should follow the monthly plan window: %+v", info)
+	}
+}
+
+func TestQuotaUnknownPlan(t *testing.T) {
+	body := `{"credits":{"monthlyCredits":4,"purchasedCredits":0,"freeCredits":0,"planId":"mystery-plan"}}`
+	srv := newCreditsServer(t, http.StatusOK, body)
+	client, _ := newTestClient(t, srv)
+	info, err := client.Quota(t.Context(), "acc-1")
+	if err != nil {
+		t.Fatalf("Quota: %v", err)
+	}
+	for _, w := range info.Windows {
+		if w.ID == "monthlyLimit" {
+			t.Fatalf("unknown plan must not fabricate a monthly total: %+v", w)
+		}
+	}
+}
+
+func TestPlanTotalCredits(t *testing.T) {
+	cases := map[string]float64{
+		"individual-go":       10,
+		"individual-goat":     70,
+		"individual-pro-v1":   80,
+		"individual-provider": 15,
+		"individual-max":      150,
+		"individual-ultra":    300,
+		"teams-pro":           40,
+	}
+	for plan, want := range cases {
+		got, ok := planTotalCredits(plan)
+		if !ok || got != want {
+			t.Errorf("planTotalCredits(%q) = %v,%v want %v", plan, got, ok, want)
+		}
+	}
+	if _, ok := planTotalCredits("nope"); ok {
+		t.Error("unknown plan must not resolve")
 	}
 }

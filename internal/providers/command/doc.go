@@ -5,9 +5,10 @@
 // (Anthropic) and /provider/v1/chat/completions (OpenAI) require the Pro plan
 // or higher and return 403 upgrade_required on the $1 Go plan. /alpha/generate
 // is the undocumented envelope the CLI itself uses on every turn; it is not
-// plan-gated, so it is the only generation path Go accounts can use. This
-// adapter therefore always speaks /alpha/generate, which serves every model in
-// the catalog regardless of that model's declared supported_endpoints.
+// plan-gated, so it serves every plan — and is the only generation path Go
+// accounts can use. This adapter therefore always speaks /alpha/generate, which
+// serves every model in the catalog regardless of that model's declared
+// supported_endpoints.
 //
 // Auth is a single user_… Bearer key shared by the CLI and the API: no OAuth,
 // no browser loopback, no device fingerprint. The catalog

@@ -19,8 +19,9 @@ const (
 	PathModels = "/provider/v1/models"
 
 	// PathGenerate is the CLI's own generation endpoint. It is not plan-gated,
-	// so the $1 Go plan can use it even though /provider/v1/messages and
-	// /provider/v1/chat/completions return 403 upgrade_required on Go.
+	// so it serves every plan; on the $1 Go plan it is the only path, since
+	// /provider/v1/messages and /provider/v1/chat/completions return
+	// 403 upgrade_required there.
 	PathGenerate = "/alpha/generate"
 
 	// PathWhoami validates a key. 200 => key resolves.

@@ -24,7 +24,7 @@ Deploy with Docker, manage accounts in the web console, and connect clients thro
 - **Web console**: manage accounts, models, client keys, and proxies; view quotas and request logs.
 - **Docker operations**: persistent account data; an optional host updater lets you download, confirm, and roll back updates from the console.
 
-Qoder CN, WorkBuddy, and Trae adapters are implemented, but live-account acceptance is still pending. Devin and Command Code (Go plan) are experimental, not production-ready. Live upgrade and rollback acceptance is also pending.
+Qoder CN, WorkBuddy, and Trae adapters are implemented, but live-account acceptance is still pending. Devin and Command Code are experimental, not production-ready. Live upgrade and rollback acceptance is also pending.
 
 ## Quick start
 
