@@ -1,0 +1,267 @@
+package command
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/caigee-cmd/cli2api/internal/accounts"
+	"github.com/caigee-cmd/cli2api/internal/providers"
+	"github.com/caigee-cmd/cli2api/internal/translate"
+)
+
+func chatReq() translate.ChatRequest {
+	return translate.ChatRequest{
+		Model:     "deepseek/deepseek-v4-pro",
+		MaxTokens: rawMessage(1024),
+		Messages:  []translate.ChatMessage{{Role: "user", Content: "hello"}},
+	}
+}
+
+func TestChatNonStreamAggregates(t *testing.T) {
+	body := ndjson(
+		`{"type":"start"}`,
+		`{"type":"reasoning-start","id":"reasoning-0"}`,
+		`{"type":"reasoning-delta","id":"reasoning-0","text":"th ink"}`,
+		`{"type":"reasoning-end","id":"reasoning-0"}`,
+		`{"type":"text-start","id":"txt-0"}`,
+		`{"type":"text-delta","id":"txt-0","text":"Hel"}`,
+		`{"type":"text-delta","id":"txt-0","text":"lo"}`,
+		`{"type":"text-end","id":"txt-0"}`,
+		`{"type":"tool-input-start","id":"call_1","toolName":"get_weather"}`,
+		`{"type":"tool-input-delta","id":"call_1","delta":"{\"loc\":"}`,
+		`{"type":"tool-input-delta","id":"call_1","delta":"\"Paris\"}"}`,
+		`{"type":"tool-input-end","id":"call_1"}`,
+		`{"type":"tool-call","toolCallId":"call_1","toolName":"get_weather","input":{"loc":"Paris"}}`,
+		`{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":5418,"outputTokens":32,"cachedInputTokens":5376}}`,
+	)
+	srv, rec, reqBody := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+
+	outcome, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatNonStream: %v", err)
+	}
+	if outcome.Content != "Hello" {
+		t.Errorf("content = %q", outcome.Content)
+	}
+	if outcome.Reasoning != "th ink" {
+		t.Errorf("reasoning = %q", outcome.Reasoning)
+	}
+	if outcome.FinishReason != "tool_calls" {
+		t.Errorf("finish = %q", outcome.FinishReason)
+	}
+	if outcome.PromptTokens != 5418 || outcome.CompletionTokens != 32 {
+		t.Errorf("tokens = %d/%d", outcome.PromptTokens, outcome.CompletionTokens)
+	}
+	if outcome.CacheReadTokens == nil || *outcome.CacheReadTokens != 5376 {
+		t.Errorf("cacheRead = %v", outcome.CacheReadTokens)
+	}
+	if outcome.UsageSource != "upstream" {
+		t.Errorf("usage source = %q", outcome.UsageSource)
+	}
+
+	var calls []struct {
+		ID       string `json:"id"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(outcome.ToolCalls, &calls); err != nil {
+		t.Fatalf("tool calls: %v (%s)", err, outcome.ToolCalls)
+	}
+	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Function.Name != "get_weather" {
+		t.Fatalf("tool calls = %+v", calls)
+	}
+	if calls[0].Function.Arguments != `{"loc":"Paris"}` {
+		t.Errorf("tool arguments = %q (the full tool-call event must win)", calls[0].Function.Arguments)
+	}
+
+	// Headers: version pin, session id, ndjson accept.
+	if got := rec.header("x-command-code-version"); got != PinnedCLIVersion {
+		t.Errorf("x-command-code-version = %q, want %q", got, PinnedCLIVersion)
+	}
+	if rec.header("x-session-id") == "" {
+		t.Error("x-session-id missing")
+	}
+	if got := rec.header("Accept"); got != "application/x-ndjson" {
+		t.Errorf("Accept = %q", got)
+	}
+	if got := rec.header("Authorization"); got != "Bearer user_test_key_1234567890" {
+		t.Errorf("auth = %q", got)
+	}
+	// The model must be sent as the resolved catalog id.
+	var env struct {
+		Params struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(*reqBody), &env); err != nil {
+		t.Fatalf("request body: %v", err)
+	}
+	if env.Params.Model != "deepseek/deepseek-v4-pro" || !env.Params.Stream {
+		t.Errorf("params = %+v", env.Params)
+	}
+}
+
+// TestChatNonStreamToolCallOnlyViaFinalEvent covers the "gotcha": per-delta
+// events use id, the final tool-call event uses toolCallId. A tool call that
+// only appears on the final event must still surface.
+func TestChatNonStreamToolCallOnlyViaFinalEvent(t *testing.T) {
+	body := ndjson(
+		`{"type":"tool-call","toolCallId":"call_x","toolName":"do_thing","input":{"a":1}}`,
+		`{"type":"finish-step","finishReason":"tool-calls"}`,
+	)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	outcome, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatNonStream: %v", err)
+	}
+	if !strings.Contains(string(outcome.ToolCalls), "call_x") {
+		t.Fatalf("final tool-call event ignored: %s", outcome.ToolCalls)
+	}
+}
+
+func TestChatNonStreamNoTerminalEvent(t *testing.T) {
+	body := ndjson(`{"type":"text-delta","id":"txt-0","text":"partial"}`)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	_, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err == nil {
+		t.Fatal("truncated stream must error")
+	}
+	var providerErr *providers.Error
+	if !asProviderError(err, &providerErr) || providerErr.Kind != accounts.KindUnavailable {
+		t.Fatalf("truncated stream must classify as unavailable, got %v", err)
+	}
+}
+
+func TestChatNonStreamErrorEvent(t *testing.T) {
+	body := ndjson(`{"type":"error","message":"Model \"x\" is not supported on this endpoint."}`)
+	srv, _, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+	_, err := client.ChatNonStream(t.Context(), "acc-1", chatReq())
+	if err == nil {
+		t.Fatal("error event must surface")
+	}
+}
+
+func TestChatStreamRewritesToSSE(t *testing.T) {
+	body := ndjson(
+		`{"type":"reasoning-delta","id":"r0","text":"think"}`,
+		`{"type":"text-delta","id":"t0","text":"Hel"}`,
+		`{"type":"text-delta","id":"t0","text":"lo"}`,
+		`{"type":"tool-input-start","id":"call_1","toolName":"get_weather"}`,
+		`{"type":"tool-input-delta","id":"call_1","delta":"{\"loc\":\"Paris\"}"}`,
+		`{"type":"tool-call","toolCallId":"call_1","toolName":"get_weather","input":{"loc":"Paris"}}`,
+		`{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":10,"outputTokens":2,"cachedInputTokens":4}}`,
+	)
+	srv, rec, _ := generateServer(t, 0, body)
+	client, _ := newTestClient(t, srv)
+
+	resp, _, err := client.ChatStream(t.Context(), "acc-1", chatReq())
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("content-type = %q", got)
+	}
+	if got := rec.header("x-command-code-version"); got != PinnedCLIVersion {
+		t.Errorf("stream request version = %q", got)
+	}
+
+	raw, _ := io.ReadAll(resp.Body)
+	text := string(raw)
+	if !strings.HasSuffix(text, "data: [DONE]\n\n") {
+		t.Fatalf("stream must end with [DONE]: %q", text)
+	}
+	for _, want := range []string{
+		`"reasoning_content":"think"`,
+		`"content":"Hel"`,
+		`"content":"lo"`,
+		`"name":"get_weather"`,
+		`"arguments":"{\"loc\":\"Paris\"}"`,
+		`"finish_reason":"tool_calls"`,
+		`"cache_read_tokens":4`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("SSE output missing %s\n%s", want, text)
+		}
+	}
+	// The final tool-call event must not re-emit arguments the deltas already
+	// streamed, or the client would see the JSON payload twice.
+	if n := strings.Count(text, `"arguments":"{\"loc\":\"Paris\"}"`); n != 1 {
+		t.Errorf("arguments emitted %d times, want 1\n%s", n, text)
+	}
+}
+
+func TestChatStreamHTTPError(t *testing.T) {
+	srv, _, _ := generateServer(t, 401, `{"success":false,"error":{"code":"UNAUTHORIZED","status":401,"message":"Invalid 'Authorization' header or token."}}`)
+	client, _ := newTestClient(t, srv)
+	client.SetBase(srv.URL)
+	_, _, err := client.ChatStream(t.Context(), "acc-1", chatReq())
+	if err == nil {
+		t.Fatal("401 must error")
+	}
+	var providerErr *providers.Error
+	if !asProviderError(err, &providerErr) || providerErr.Kind != accounts.KindAuth {
+		t.Fatalf("401 should classify as auth, got %v", err)
+	}
+}
+
+func TestProbe(t *testing.T) {
+	srv := newWhoamiServer(t, http.StatusOK, `{"success":true,"user":{"id":"u_1","email":"a@b.c"}}`)
+	client, store := newTestClient(t, srv)
+	health, err := client.Probe(t.Context(), "acc-1")
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !health.Ready || !health.Hot {
+		t.Errorf("health = %+v", health)
+	}
+	if health.UID != "u_1" {
+		t.Errorf("uid = %q", health.UID)
+	}
+	if store.observed["acc-1"] != "ready" {
+		t.Errorf("observe status = %q", store.observed["acc-1"])
+	}
+}
+
+func TestProbeBadKey(t *testing.T) {
+	srv := newWhoamiServer(t, http.StatusUnauthorized, `{"success":false,"error":{"code":"UNAUTHORIZED","status":401,"message":"Invalid 'Authorization' header or token."}}`)
+	client, _ := newTestClient(t, srv)
+	health, err := client.Probe(t.Context(), "acc-1")
+	if err != nil {
+		t.Fatalf("Probe must not hard-fail on a bad key, got %v", err)
+	}
+	if health.Ready {
+		t.Error("bad key must not be ready")
+	}
+	if health.LastError == "" {
+		t.Error("bad key must carry a last-error message")
+	}
+}
+
+func TestQuotaCredits(t *testing.T) {
+	srv := newCreditsServer(t, http.StatusOK, `{"credits":{"monthlyCredits":9.5,"purchasedCredits":1,"freeCredits":0.5}}`)
+	client, _ := newTestClient(t, srv)
+	info, err := client.Quota(t.Context(), "acc-1")
+	if err != nil {
+		t.Fatalf("Quota: %v", err)
+	}
+	if info == nil || info.Remaining != 11 {
+		t.Fatalf("quota = %+v", info)
+	}
+	if info.ProviderID != "command" || info.Unit != QuotaUnit {
+		t.Errorf("quota metadata = %+v", info)
+	}
+	if info.Exceeded {
+		t.Errorf("exceeded should be false when credits remain: %+v", info)
+	}
+}
